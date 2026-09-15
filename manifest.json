@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omaplug",
   "name": "Plugin Manager",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "author": "Fross",
   "license": "MIT",
   "description": "Manage installed Omarchy plugins: enable/disable, update, install from git, and remove third-party plugins",
@@ -16,6 +16,39 @@
     "displayName": "Plugin Manager",
     "description": "Enable/disable, update, install, and remove plugins",
     "category": "System",
-    "allowMultiple": false
+    "allowMultiple": false,
+    "defaults": {
+      "reviewEnabled": true,
+      "reviewBudgetUsd": 5,
+      "reviewTimeoutSec": 600
+    },
+    "schema": [
+      {
+        "key": "reviewEnabled",
+        "type": "boolean",
+        "label": "Review plugins before installing",
+        "description": "Before an install runs, clone the repository into a throwaway directory and ask your default Omarchy coding agent (omarchy default agent) for a security review — no tools, no session, only the bundled source as input. Supported today: Claude Code, Codex, opencode. Any other default agent shows why a review isn't available and offers Install without review, exactly like a failed review would.",
+        "defaultValue": true
+      },
+      {
+        "key": "reviewBudgetUsd",
+        "type": "number",
+        "label": "Review budget (USD, Claude Code only)",
+        "description": "Passed to the reviewer as a spend cap for a single review. Only enforced when the default agent is Claude Code.",
+        "min": 0.5,
+        "max": 50,
+        "step": 0.5,
+        "defaultValue": 5
+      },
+      {
+        "key": "reviewTimeoutSec",
+        "type": "integer",
+        "label": "Review timeout (seconds)",
+        "min": 60,
+        "max": 1800,
+        "step": 30,
+        "defaultValue": 600
+      }
+    ]
   }
 }

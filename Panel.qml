@@ -222,6 +222,23 @@ Panel {
     root.persistAutoCheckSetting({ autoCheckIntervalHours: value })
   }
 
+  // ------------------------------------------------------- review settings
+  // A pre-install review is advice, never a gate: reviewEnabled just skips
+  // straight to the confirmation with an explanation, the way an
+  // unsupported default agent already does. Runs with whatever coding agent
+  // is the user's Omarchy default (`omarchy default agent`) — there is no
+  // separate "review model" choice, since the point is auditing with the
+  // same agent the user already trusts, not a second one to configure.
+  readonly property bool reviewEnabled: root.setting("reviewEnabled", true) === true
+  readonly property real reviewBudgetUsd: {
+    var v = Number(root.setting("reviewBudgetUsd", 5))
+    return (isFinite(v) && v > 0) ? v : 5
+  }
+  readonly property int reviewTimeoutSec: {
+    var v = Number(root.setting("reviewTimeoutSec", 600))
+    return (isFinite(v) && v > 0) ? Math.round(v) : 600
+  }
+
   // Update checking state, keyed by the plugin folder name (sourceKey).
   property var updateStates: ({})
   property bool checkingUpdates: false
@@ -262,9 +279,8 @@ Panel {
   property bool installRunning: false
   property bool installFailed: false
   property string installResult: ""
-  // Confirm popup shown before running install: makes the disabled-by-default
-  // policy explicit. installPendingUrl carries the extracted URL.
-  property bool installConfirmOpen: false
+  // installPendingUrl carries the URL extracted/resolved from the install
+  // dialog's input, shown throughout the review and the confirmation.
   property string installPendingUrl: ""
   // Status file for the detached installer. The file is created securely
   // via mktemp (XDG_RUNTIME_DIR) so the helper can truncate it without
@@ -272,6 +288,23 @@ Panel {
   // not enabled by default — user must enable manually after reviewing.
   property string installStatusPath: ""
   property bool installDetachedRunning: false
+
+  // ------------------------------------------------------- pre-install review
+  // Shown between "Install" and `omarchy plugin add`. Its own floating
+  // layer-shell window (Dialogs.ReviewWindow), not a panel-internal dialog:
+  // a review with findings does not fit the popup, and can run for minutes
+  // while the user keeps working elsewhere.
+  property bool installReviewOpen: false
+  property bool installReviewRunning: false
+  property bool installReviewFailed: false
+  property string installReviewStage: ""
+  property string installReviewError: ""
+  property var installReview: null
+  property string installReviewedCommit: ""
+  property string installReviewWorkDir: ""
+  property string installReviewLineBuf: ""
+  property int installReviewProcessed: 0
+  property string reviewHelperPath: ""
 
   // Plugin removal state. Each row gets a trash button for a single remove, and
   // a select mode (check list) removes several at once via a sequential queue.
@@ -299,8 +332,7 @@ Panel {
       root.installRunning = false
       root.installFailed = false
       root.installResult = ""
-    } else {
-      root.installConfirmOpen = false
+    } else if (!root.installReviewOpen) {
       root.installPendingUrl = ""
     }
   }
@@ -969,7 +1001,9 @@ Panel {
           snapshotCommit: typeof entry.verificationCommit === "string" ? entry.verificationCommit : "",
           snapshotStatus: String(entry.verificationCoverage || entry.verificationSnapshotStatus || entry.verificationStatus || ""),
           upstreamCommit: typeof entry.upstreamObservedCommit === "string" ? entry.upstreamObservedCommit : "",
-          releaseUrl: entry.repositoryRelease && typeof entry.repositoryRelease.url === "string" ? entry.repositoryRelease.url : ""
+          releaseUrl: entry.repositoryRelease && typeof entry.repositoryRelease.url === "string" ? entry.repositoryRelease.url : "",
+          repo: typeof entry.repo === "string" ? entry.repo : "",
+          installAvailable: entry.installAvailable === true
         }
       }
     } catch (e) {
@@ -1201,30 +1235,77 @@ Panel {
     return ""
   }
 
+  // Accepts a marketplace listing link (https://plugins.omarchy.org/plugin.html?id=<key>)
+  // or a bare marketplace key (the plugin's manifest id, e.g. "omaplug" or
+  // "io.github.andeen171.library") and resolves it to the plugin's git URL
+  // via the already-fetched marketplace catalog. Returns "" if the input
+  // does not look like a marketplace reference at all (the caller falls
+  // back to treating it as a plain URL), and a distinct error string via
+  // root.installResult when it does look like one but cannot be resolved.
+  function resolveMarketplaceKey(key) {
+    var id = String(key || "").trim()
+    if (id === "") return null
+    var entry = root.marketplaceMap[id]
+    if (!entry) return { error: "No marketplace listing found for \"" + id + "\"." }
+    if (!entry.repo) return { error: "\"" + id + "\" has no installable repository on the marketplace." }
+    if (entry.installAvailable === false)
+      return { error: "\"" + id + "\" is not installable via `omarchy plugin add` (see its marketplace listing)." }
+    return { url: entry.repo }
+  }
+
+  // A marketplace key looks like a manifest id: lowercase/mixed
+  // alnum/dot/dash/underscore segments, no scheme, no slash-delimited path —
+  // this rules out both plain URLs and owner/repo shorthand so it never
+  // shadows extractInstallUrl.
+  function looksLikeMarketplaceKey(text) {
+    return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text) && text.indexOf("/") === -1
+  }
+
+  function resolveMarketplaceInput(rawText) {
+    var t = String(rawText || "").trim()
+    if (t === "") return null
+    var link = t.match(/^https?:\/\/plugins\.omarchy\.org\/plugin\.html\?(?:[^#]*&)?id=([^&#]+)/)
+    if (link) return root.resolveMarketplaceKey(decodeURIComponent(link[1]))
+    if (root.looksLikeMarketplaceKey(t)) return root.resolveMarketplaceKey(t)
+    return null
+  }
+
   // Called from the install dialog: extract the URL and ask for
-  // confirmation. Only GitHub URLs are accepted (https://github.com/owner/repo
-  // or git@github.com:owner/repo.git), matching omarchy plugin/theme
+  // confirmation. Accepts a plain GitHub URL, a marketplace listing link, or
+  // a bare marketplace key (the plugin's id). Only GitHub URLs are accepted
+  // as the resolved target (https://github.com/owner/repo or
+  // git@github.com:owner/repo.git), matching omarchy plugin/theme
   // expectations and preventing arbitrary host installs. The plugin is
   // installed but NOT enabled by default.
   function requestInstall(rawText) {
     var raw = String(rawText || "").trim()
     if (raw === "") return
-    var url = root.extractInstallUrl(raw)
-    if (url === "") {
-      root.installResult = "Please enter a valid GitHub repository URL (https://github.com/owner/repo or git@github.com:owner/repo.git)"
+    var marketplace = root.resolveMarketplaceInput(raw)
+    var url
+    if (marketplace) {
+      if (marketplace.error) {
+        root.installResult = marketplace.error
+        root.installFailed = true
+        return
+      }
+      url = marketplace.url
+    } else {
+      url = root.extractInstallUrl(raw)
+    }
+    if (url === "" || !url) {
+      root.installResult = "Please enter a valid GitHub repository URL, a marketplace plugin key, or a marketplace listing link (https://plugins.omarchy.org/plugin.html?id=...)"
       root.installFailed = true
       return
     }
     root.installFailed = false
     root.installResult = ""
     root.installPendingUrl = url
-    root.installConfirmOpen = true
+    root.startInstallReview(url)
   }
 
   function installPlugin() {
     var url = root.installPendingUrl
     if (url === "") return
-    root.installConfirmOpen = false
     root.installRunning = true
     root.installFailed = false
     root.installResult = "Installing " + url + "…"
@@ -1251,9 +1332,220 @@ Panel {
     installStatusFile.reload()
   }
 
-  function cancelInstallConfirm() {
+  // ----------------------------------------------------- pre-install review
+
+  function startInstallReview(url) {
+    // Opting out keeps the same window and the same final say; it just
+    // arrives without a verdict, the way "Install without review" does.
+    if (!root.reviewEnabled || root.reviewHelperPath === "") {
+      root.installReview = null
+      root.installReviewedCommit = ""
+      root.installReviewOpen = true
+      root.installReviewRunning = false
+      root.installReviewFailed = true
+      root.installReviewError = root.reviewEnabled
+        ? "Review helper not found"
+        : "Pre-install review is turned off for this widget (reviewEnabled)."
+      return
+    }
+    if (installReviewProcess.running) installReviewProcess.signal(9)
+    root.cleanupInstallReviewDir()
+    root.installReview = null
+    root.installReviewedCommit = ""
+    root.installReviewError = ""
+    root.installReviewFailed = false
+    root.installReviewRunning = true
+    root.installReviewStage = "Starting…"
+    root.installReviewLineBuf = ""
+    root.installReviewProcessed = 0
+    root.installReviewOpen = true
+    root.installReviewWorkDir = root.updateStateRoot + "/review-"
+      + Date.now().toString(36) + "-" + Math.floor(Math.random() * 0x1000000).toString(36)
+    installReviewWatchdog.interval = root.reviewTimeoutSec * 1000 + 300000
+    installReviewWatchdog.restart()
+    installReviewProcess.command = [root.reviewHelperPath, url, root.installReviewWorkDir]
+    installReviewProcess.running = true
+  }
+
+  function cancelInstallReview() {
+    if (installReviewProcess.running) installReviewProcess.signal(15)
+    installReviewWatchdog.stop()
+    root.cleanupInstallReviewDir()
+    root.installReviewOpen = false
+    root.installReviewRunning = false
+    root.installReview = null
+    root.installReviewedCommit = ""
     root.installPendingUrl = ""
-    root.installConfirmOpen = false
+  }
+
+  function retryInstallReview() {
+    var url = root.installPendingUrl
+    if (url === "") return
+    root.startInstallReview(url)
+  }
+
+  // The verdict is advice; this is the user's call. The reviewed commit is
+  // kept so the install can be checked against it.
+  function confirmInstallAfterReview() {
+    root.installReviewOpen = false
+    root.cleanupInstallReviewDir()
+    root.installReview = null
+    // The panel may have been closed and reopened since the review started;
+    // the install dialog is where progress and the result are shown.
+    root.open()
+    root.installDialogOpen = true
+    root.installPlugin()
+  }
+
+  // The work dir holds the reviewed clone. It is only ever a path this panel
+  // made under its own runtime root, and that is re-checked before rm -rf.
+  function cleanupInstallReviewDir() {
+    var dir = root.installReviewWorkDir
+    root.installReviewWorkDir = ""
+    if (dir === "" || dir.indexOf("..") !== -1) return
+    if (dir.indexOf(root.updateStateRoot + "/review-") !== 0) return
+    Quickshell.execDetached(["rm", "-rf", "--", dir])
+  }
+
+  // Everything in the review came out of a model that read an untrusted
+  // repository, so it is bounded and stripped before it reaches a Text.
+  function sanitizeReview(raw) {
+    var r = raw && typeof raw === "object" ? raw : {}
+    function str(v, n) {
+      var s = String(v === undefined || v === null ? "" : v)
+      s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "")
+      return s.length > n ? s.substring(0, n - 1) + "…" : s
+    }
+    var verdicts = ["safe", "caution", "danger"]
+    var severities = ["info", "low", "medium", "high", "critical"]
+    var verdict = verdicts.indexOf(r.verdict) >= 0 ? r.verdict : "caution"
+    var promptInjection = r.prompt_injection_detected === true
+    if (promptInjection) verdict = "danger"
+    var caps = []
+    if (Array.isArray(r.capabilities))
+      for (var i = 0; i < r.capabilities.length && caps.length < 12; i++) {
+        var c = str(r.capabilities[i], 120)
+        if (c !== "") caps.push(c)
+      }
+    var findings = []
+    if (Array.isArray(r.findings))
+      for (var j = 0; j < r.findings.length && findings.length < 20; j++) {
+        var f = r.findings[j]
+        if (!f || typeof f !== "object") continue
+        findings.push({
+          severity: severities.indexOf(f.severity) >= 0 ? f.severity : "info",
+          title: str(f.title, 120),
+          file: str(f.file, 120),
+          detail: str(f.detail, 600)
+        })
+      }
+    var commit = String(r.commit || "")
+    return {
+      verdict: verdict,
+      summary: str(r.summary, 600),
+      capabilities: caps,
+      findings: findings,
+      promptInjection: promptInjection,
+      model: str(r.model, 80),
+      commit: /^[0-9a-f]{40}$/.test(commit) ? commit : "",
+      costUsd: Number(r.cost_usd) || 0,
+      files: Number(r.files) || 0,
+      truncated: r.truncated === true
+    }
+  }
+
+  function applyInstallReviewLine(line) {
+    var clean = String(line || "")
+    if (clean.trim() === "") return
+    var parts = clean.split("\t")
+    var kind = parts[0]
+    if (kind === "stage") {
+      var stages = {
+        clone: "Cloning repository…",
+        bundle: "Bundling source files…",
+        review: "Reviewing with your default coding agent… this can take a few minutes"
+      }
+      root.installReviewStage = stages[parts[1]] || String(parts[1] || "")
+    } else if (kind === "commit") {
+      root.installReviewedCommit = /^[0-9a-f]{40}$/.test(parts[1] || "") ? parts[1] : ""
+    } else if (kind === "error") {
+      root.installReviewError = String(parts.slice(1).join(" ")).substring(0, 300)
+    } else if (kind === "review") {
+      var parsed = null
+      try { parsed = JSON.parse(parts.slice(1).join("\t")) } catch (e) { parsed = null }
+      if (parsed) {
+        var review = root.sanitizeReview(parsed)
+        if (review.commit !== "") root.installReviewedCommit = review.commit
+        root.installReview = review
+      }
+    }
+  }
+
+  // Streaming line parser over the cumulative collector text, the same shape
+  // as applyUpdateCheckData. The review line is the only long one; anything
+  // past 256 KB is not a review, it is a runaway, and is cut off.
+  function applyInstallReviewData(text) {
+    var all = String(text || "")
+    if (all.length > 262144) {
+      if (installReviewProcess.running) installReviewProcess.signal(9)
+      return
+    }
+    var fresh = all.substring(root.installReviewProcessed)
+    root.installReviewProcessed = all.length
+    root.installReviewLineBuf += fresh
+    var idx = root.installReviewLineBuf.lastIndexOf("\n")
+    if (idx < 0) return
+    var ready = root.installReviewLineBuf.substring(0, idx + 1)
+    root.installReviewLineBuf = root.installReviewLineBuf.substring(idx + 1)
+    var lines = ready.split("\n")
+    for (var i = 0; i < lines.length; i++) root.applyInstallReviewLine(lines[i])
+  }
+
+  function finishInstallReview(exitCode) {
+    if (root.installReviewLineBuf !== "") {
+      var tail = root.installReviewLineBuf
+      root.installReviewLineBuf = ""
+      root.applyInstallReviewLine(tail)
+    }
+    installReviewWatchdog.stop()
+    root.installReviewRunning = false
+    if (!root.installReviewOpen) return
+    if (root.installReview === null) {
+      root.installReviewFailed = true
+      if (root.installReviewError === "")
+        root.installReviewError = exitCode === 0 ? "The review returned nothing" : "Review failed (exit " + exitCode + ")"
+    }
+  }
+
+  property Process installReviewProcess: Process {
+    environment: ({
+      "OMAPLUG_REVIEW_BUDGET_USD": String(root.reviewBudgetUsd),
+      "OMAPLUG_REVIEW_TIMEOUT": String(root.reviewTimeoutSec)
+    })
+    onExited: function(exitCode) {
+      root.finishInstallReview(exitCode)
+    }
+    stdout: StdioCollector {
+      id: installReviewStdout
+      waitForEnd: false
+      onTextChanged: root.applyInstallReviewData(installReviewStdout.text)
+    }
+    stderr: StdioCollector {}
+  }
+
+  // The helper has its own per-step timeouts; this is the backstop in case
+  // it hangs somewhere they do not cover. Sized off reviewTimeoutSec (set
+  // just before each run) plus headroom for clone+bundle.
+  property Timer installReviewWatchdog: Timer {
+    interval: 900000
+    repeat: false
+    onTriggered: {
+      if (!root.installReviewRunning) return
+      if (installReviewProcess.running) installReviewProcess.signal(9)
+      root.installReviewRunning = false
+      root.installReviewFailed = true
+      root.installReviewError = "Review timed out"
+    }
   }
 
   Process {
@@ -1587,6 +1879,11 @@ Panel {
     root.updateHelperPath = String(Qt.resolvedUrl("plugin-state.sh")).replace(/^file:\/\//, "")
     root.updateRunnerPath = String(Qt.resolvedUrl("update-helper.sh")).replace(/^file:\/\//, "")
     root.autoCheckCoordinatorPath = String(Qt.resolvedUrl("auto-check-coordinator.sh")).replace(/^file:\/\//, "")
+    root.reviewHelperPath = String(Qt.resolvedUrl("agent-review.sh")).replace(/^file:\/\//, "")
+    // A review does not survive a shell reload (its state lives here), so
+    // any review-* dir left under the runtime root is an orphan.
+    if (root.updateStateRoot !== "" && root.updateStateRoot.indexOf("..") === -1)
+      Quickshell.execDetached(["bash", "-c", 'for d in "$0"/review-*/; do [ -d "$d" ] && rm -rf -- "$d"; done', root.updateStateRoot])
     refreshPlugins()
     fetchMarketplace()
     Qt.callLater(function() { updateStatusFile.reload(); installStatusFile.reload() })
@@ -2232,22 +2529,22 @@ Panel {
       onInstallRequested: function(rawUrl) { root.requestInstall(rawUrl) }
     }
 
-    Dialogs.Confirm {
-      anchors.fill: parent
-      z: 11000
-
-      open: root.installConfirmOpen
-      title: "Install plugin?"
-      message: "\"" + root.installPendingUrl + "\" will be added via `omarchy plugin add` but will remain DISABLED until you enable it manually. Review the code after install, then enable from the plugin list."
-      confirmText: "Install"
-      maximumWidth: Style.space(380)
-      titleWrapMode: Text.WordWrap
+    // Its own floating window, not a child of the panel: see ReviewWindow.qml.
+    Dialogs.ReviewWindow {
+      open: root.installReviewOpen
+      running: root.installReviewRunning
+      failed: root.installReviewFailed
+      stage: root.installReviewStage
+      errorText: root.installReviewError
+      review: root.installReview
+      url: root.installPendingUrl
       foreground: root.contentForeground
       fontFamily: root.contentFontFamily
       panelBackground: root.panelBackground
 
-      onCancelRequested: root.cancelInstallConfirm()
-      onConfirmRequested: root.installPlugin()
+      onCancelRequested: root.cancelInstallReview()
+      onRetryRequested: root.retryInstallReview()
+      onInstallRequested: root.confirmInstallAfterReview()
     }
   }
 }

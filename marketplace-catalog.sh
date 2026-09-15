@@ -15,6 +15,12 @@ curl -fsSL --max-time 30 --max-filesize 16777216 "$CATALOG_URL" |
           | select((.id | type) == "string" and (.id | length) > 0)
           | {
               id,
+              name,
+              author,
+              description,
+              version,
+              repo,
+              installAvailable,
               verificationStatus,
               verificationCommit,
               verificationSnapshotStatus,

@@ -57,7 +57,7 @@ Rectangle {
       spacing: Style.space(12)
 
       Text {
-        text: "Install a plugin from a git repo"
+        text: "Install a plugin from a git repo, a marketplace key, or a marketplace link"
         textFormat: Text.PlainText
         color: dialog.foreground
         font.family: dialog.fontFamily
@@ -68,7 +68,7 @@ Rectangle {
       }
 
       Text {
-        text: "Plugins run as arbitrary, unsandboxed code inside your omarchy-shell process. Only add repos you trust — review the code before you enable the plugin."
+        text: "Plugins run as arbitrary, unsandboxed code inside your omarchy-shell process. A pre-install review with your default coding agent runs automatically before the confirmation — read its verdict, and the code itself, before you enable the plugin."
         textFormat: Text.PlainText
         color: Qt.darker(dialog.foreground, 1.6)
         font.family: dialog.fontFamily
@@ -80,7 +80,7 @@ Rectangle {
       TextField {
         id: urlField
 
-        placeholderText: "https://github.com/acme/omarchy-weather.git"
+        placeholderText: "https://github.com/acme/omarchy-weather.git, a marketplace key, or a plugins.omarchy.org link"
         foreground: dialog.foreground
         accent: Color.accent
         font.family: dialog.fontFamily

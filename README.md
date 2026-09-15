@@ -45,7 +45,8 @@ Omaplug is listed on the marketplace: [plugins.omarchy.org/plugin.html?id=omaplu
 - **🔌 Enable / disable** — every discovered plugin (Omarchy's own and third-party) gets a simple toggle. Flipping it goes through the same registry the `omarchy plugin enable/disable` command uses, so what you see here is always what's really running.
 - **🔄 Check for updates** — scans every installed third-party plugin and distinguishes clean updates from local plugins, symlinked development plugins, local changes, and genuine fetch errors.
 - **⬆️ Update (or update everything)** — apply one update, or finish every proven-safe pending update from a single click, even while Omarchy reloads changed plugins.
-- **➕ Install** — paste a git repo URL and add a plugin in one step. It'll warn you first that plugins run as unsandboxed code, because honesty is the default here.
+- **➕ Install** — paste a git repo URL, a marketplace plugin key (its manifest id, e.g. `omaplug`), or a marketplace listing link (`https://plugins.omarchy.org/plugin.html?id=...`) and add a plugin in one step. It'll warn you first that plugins run as unsandboxed code, because honesty is the default here.
+- **🔍 Reviewed before install** — the repository is cloned to a scratch directory, every source file is bundled, and your Omarchy default coding agent (`omarchy default agent`) reads it with no tools and no ability to act, then answers with a verdict (`safe` / `caution` / `danger`), a plain-language summary, what the plugin *can* do, and concrete findings. You see all of that before `omarchy plugin add` runs, and you always get the final say. After install the checkout is compared to the commit that was reviewed, so an upstream push in between can't slip past.
 - **🗑️ Remove** — third-party plugins only. Trash one, or enter Select mode to check several and remove them all at once (with a confirmation, no accidents).
 - **🔗 Source link** — every git-managed plugin gets a `SOURCE` button that jumps straight to its repo page.
 - **🔍 Search & filter** — narrow the list to Omarchy plugins, third-party plugins, or search by name, description, ID, author, or kind.
@@ -81,12 +82,46 @@ rm -rf ~/.config/omarchy/plugins/omaplug
 omarchy-restart-shell
 ```
 
+## Pre-install review
+
+Every install goes through `agent-review.sh` first, using whatever coding agent you've already set as your Omarchy default (`omarchy default agent`) — there's no separate agent to log into just for this. Only agents with both a genuine headless mode and a way to run with tools fully denied are wired up:
+
+| Agent | How it's run |
+| --- | --- |
+| [Claude Code](https://claude.com/claude-code) | `claude -p --tools ""` — tools fully disabled |
+| [Codex](https://github.com/openai/codex) | `codex exec --disable shell_tool --sandbox read-only --ignore-user-config` — shell tool off, your own MCP servers/plugins are not loaded |
+| [opencode](https://opencode.ai) | `opencode run --agent <all-permissions-denied>` against a throwaway scratch project, with `XDG_CONFIG_HOME` redirected so your own global MCP servers/plugins never load either |
+
+Any other default agent (Pi, Oh My Pi, Ori, Grok, OpenClaw, Antigravity, Hermes, GitHub Copilot, Crush, Cursor CLI, Muse Code, …) shows why a review isn't available for it and offers **Install without review** — the same fallback a failed review gets. Switching your default agent (`omarchy default agent <name>`) is all it takes to bring the review back once that agent grows a compatible headless mode.
+
+The repository is handed over on stdin only, with tools denied at the harness level, so a hostile repository has nothing to steer regardless of which agent is doing the reading. Each file is wrapped in delimiters carrying a per-run nonce so file contents can't forge a boundary, and the reviewer is told to treat anything that addresses it as a prompt-injection attempt (which forces a `danger` verdict). The agent also never runs from inside the cloned repository itself — always a neutral scratch directory — so even a bug that granted it tools anyway would find no project config to pick up.
+
+The verdict is advice, not a gate: `safe` offers **Install**, `caution` and `danger` offer **Install anyway**, and a review that couldn't run (unsupported agent, not installed, not logged in, timeout, over budget) offers **Retry** or **Install without review**. Nothing is enabled automatically either way.
+
+The result opens in its own floating window, centred on the monitor you are looking at and sized to fit the whole review, so the buttons are always on screen; the desktop stays usable underneath while a review runs.
+
+A review of a typical plugin costs well under a dollar (Claude Code, Codex) or a few cents (opencode, model-dependent) and takes under a minute. Turn it off per widget in `shell.json` (these are the bar widget's settings, so Omarchy's widget settings UI shows them too):
+
+```json
+{ "id": "omaplug", "reviewEnabled": false }
+```
+
+A couple more knobs are environment variables on the shell process:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OMAPLUG_REVIEW_BUDGET_USD` | `5` | Hard spend cap per review (Claude Code's `--max-budget-usd`; not enforced by other agents) |
+| `OMAPLUG_REVIEW_TIMEOUT` | `600` | Seconds before the review is killed |
+
+An LLM review is a screen, not a proof. It reads the code as it is at that commit; it can't see what a later update brings, and a determined author can still hide behaviour behind runtime downloads or obfuscation the reviewer flags but can't resolve. Treat `safe` as "nothing found", not "nothing there".
+
 ## Requirements
 
 - Omarchy 4.x
 - Quickshell
 - `git`, `jq`, and the `omarchy` CLI
 - Standard coreutils (`setsid`, `nohup`, `timeout`, `sed`)
+- A default coding agent set (`omarchy default agent <name>`) for the pre-install review — optional; without one supported, installs offer "Install without review"
 
 ## License
 

@@ -17,6 +17,17 @@ BarWidget {
     function close() { if (panelItem) panelItem.close() }
     function togglePanel() { if (panelItem) panelItem.toggle() }
 
+    // Entry point for `omarchy-shell omaplug install <text>`: opens the panel
+    // straight into the install dialog and runs the same URL/marketplace-key/
+    // marketplace-link resolution and review a pasted entry gets from the UI.
+    function install(rawText) {
+        root.open()
+        if (panelItem) {
+            panelItem.installDialogOpen = true
+            panelItem.requestInstall(String(rawText || ""))
+        }
+    }
+
     // Forwarded so this widget can stand in for the panel as the bar's popout
     // identity: Bar.requestPopout prefers closeForPopoutSwitch over close, and
     // KeyboardPanel reads popoutSwitchClosing back off its owner.
@@ -61,6 +72,7 @@ BarWidget {
         function show(): void { root.open() }
         function hide(): void { root.close() }
         function toggle(): void { root.togglePanel() }
+        function install(rawText: string): void { root.install(rawText) }
     }
 
     BarIconButton {
